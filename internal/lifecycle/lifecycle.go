@@ -123,6 +123,60 @@ type Hook struct {
 	callerFrame fxreflect.Frame
 }
 
+// A PrecheckHook is a callback that verifies a runtime condition before
+// application startup. Unlike Hook, it has no stop counterpart: a failed
+// pre-check prevents any OnStart hook from running, so there is nothing to
+// roll back. Any side effects performed by a pre-check callback are not
+// undone by Fx.
+type PrecheckHook struct {
+	// Name identifies the check in error messages. If empty, the
+	// function name is used.
+	Name string
+
+	// OnCheck verifies a single runtime condition. It receives the
+	// application startup context (including its deadline) and returns
+	// an error if the condition is not met.
+	OnCheck func(context.Context) error
+
+	// OnCheckName is the sanitized function name of the check callback.
+	OnCheckName string
+
+	callerFrame fxreflect.Frame
+}
+
+// PrecheckError reports that a single pre-check failed. It wraps the original
+// error so callers can inspect it with errors.Is/errors.As.
+type PrecheckError struct {
+	// Name is the name of the failed check.
+	Name string
+
+	// Cause is the error returned by the check callback.
+	Cause error
+}
+
+func (e *PrecheckError) Error() string {
+	return fmt.Sprintf("precheck %q failed: %v", e.Name, e.Cause)
+}
+
+// Unwrap returns the original error returned by the check callback.
+func (e *PrecheckError) Unwrap() error {
+	return e.Cause
+}
+
+// displayName returns the name used to identify the check in error messages,
+// falling back to the callback's function name when no explicit name was
+// given.
+func (h PrecheckHook) displayName() string {
+	switch {
+	case h.Name != "":
+		return h.Name
+	case h.OnCheckName != "":
+		return h.OnCheckName
+	default:
+		return fxreflect.FuncName(h.OnCheck)
+	}
+}
+
 type appState int
 
 const (
@@ -156,6 +210,7 @@ type Lifecycle struct {
 	logger       fxevent.Logger
 	state        appState
 	hooks        []Hook
+	prechecks    []PrecheckHook
 	numStarted   int
 	startRecords HookRecords
 	stopRecords  HookRecords
@@ -175,6 +230,71 @@ func (l *Lifecycle) Append(hook Hook) {
 		hook.callerFrame = f[0]
 	}
 	l.hooks = append(l.hooks, hook)
+}
+
+// AppendPrecheck adds a pre-check hook to the lifecycle. Pre-check hooks run
+// in registration order before any OnStart hook whenever the lifecycle is
+// started, including after a previously failed start attempt.
+func (l *Lifecycle) AppendPrecheck(hook PrecheckHook) {
+	// Save the caller's stack frame to report file/line number.
+	if f := fxreflect.CallerStack(2, 0); len(f) > 0 {
+		hook.callerFrame = f[0]
+	}
+	l.prechecks = append(l.prechecks, hook)
+}
+
+// Precheck runs all registered pre-check hooks in registration order using
+// the given context, which is shared with the upcoming OnStart phase
+// (including its deadline).
+//
+// Errors that are not caused by context cancellation are collected into a
+// combined error and execution continues with the next check. If the context
+// is canceled, or if a check returns a cancellation error
+// (context.Canceled or context.DeadlineExceeded, possibly wrapped), no
+// further checks run.
+//
+// Results are never cached: every call runs all checks from scratch, so a
+// failed start can be retried after the runtime conditions change.
+func (l *Lifecycle) Precheck(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("called precheck with nil context")
+	}
+
+	l.mu.Lock()
+	checks := l.prechecks[:]
+	l.mu.Unlock()
+
+	var errs []error
+	for _, check := range checks {
+		// If the context is done, do not run any further checks.
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, err)
+			break
+		}
+
+		if check.OnCheck == nil {
+			continue
+		}
+
+		err := check.OnCheck(ctx)
+		if err == nil {
+			continue
+		}
+
+		// A cancellation error aborts the remaining checks; the shared
+		// startup context is no longer usable.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			errs = append(errs, err)
+			break
+		}
+
+		errs = append(errs, &PrecheckError{
+			Name:  check.displayName(),
+			Cause: err,
+		})
+	}
+
+	return multierr.Combine(errs...)
 }
 
 // Start runs all OnStart hooks, returning immediately if it encounters an

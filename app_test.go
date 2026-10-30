@@ -88,13 +88,15 @@ func TestNewApp(t *testing.T) {
 
 		var (
 			l Lifecycle
+			p Prechecker
 			s Shutdowner
 		)
 		fxtest.New(
 			t,
-			Populate(&l, &s),
+			Populate(&l, &p, &s),
 		)
 		assert.NotNil(t, l)
+		assert.NotNil(t, p)
 		assert.NotNil(t, s)
 	})
 
@@ -116,6 +118,7 @@ func TestNewApp(t *testing.T) {
 		// Fx types get provided first to increase chance of
 		// successful custom logger build.
 		assert.Contains(t, spy.Events()[0].(*fxevent.Provided).OutputTypeNames, "fx.Lifecycle")
+		assert.Contains(t, spy.Events()[0].(*fxevent.Provided).OutputTypeNames, "fx.Prechecker")
 		assert.Contains(t, spy.Events()[1].(*fxevent.Provided).OutputTypeNames, "fx.Shutdowner")
 		assert.Contains(t, spy.Events()[2].(*fxevent.Provided).OutputTypeNames, "fx.DotGraph")
 		// Our type should be index 3.

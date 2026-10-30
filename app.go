@@ -285,7 +285,8 @@ var NopLogger = WithLogger(func() fxevent.Logger { return fxevent.NopLogger })
 //
 // Once all the invocations (and any required constructors) have been called,
 // New returns and the application is ready to be started using Run or Start.
-// On startup, it executes any OnStart hooks registered with its Lifecycle.
+// On startup, it first runs any pre-checks registered with a [Prechecker],
+// then executes any OnStart hooks registered with its Lifecycle.
 // OnStart hooks are executed one at a time, in order, and must all complete
 // within a configurable deadline (by default, 15 seconds). For details on the
 // order in which OnStart hooks are executed, see the documentation for the
@@ -298,9 +299,10 @@ var NopLogger = WithLogger(func() fxevent.Logger { return fxevent.NopLogger })
 // execute one at a time, in reverse order, and must all complete within a
 // configurable deadline (again, 15 seconds by default).
 type App struct {
-	err       error
-	clock     fxclock.Clock
-	lifecycle *lifecycleWrapper
+	err        error
+	clock      fxclock.Clock
+	lifecycle  *lifecycleWrapper
+	prechecker *precheckWrapper
 
 	container *dig.Container
 	root      *module
@@ -462,6 +464,10 @@ func New(opts ...Option) *App {
 	app.lifecycle = &lifecycleWrapper{
 		lifecycle.New(appLogger{app}, app.clock),
 	}
+	// The precheck wrapper shares the same underlying lifecycle registry,
+	// so pre-checks registered through DI run as part of this lifecycle's
+	// startup.
+	app.prechecker = &precheckWrapper{app.lifecycle.Lifecycle}
 
 	containerOptions := []dig.Option{
 		dig.DeferAcyclicVerification(),
@@ -479,9 +485,13 @@ func New(opts ...Option) *App {
 	// can be successfully built in the face of unrelated DI failure.
 	// E.g., for a custom logger that relies on the Lifecycle type.
 	frames := fxreflect.CallerStack(0, 0) // include New in the stack for default Provides
+	// Provide Lifecycle and Prechecker from a single constructor so they
+	// form one node (and one Provided event) in the dependency graph.
 	app.root.provide(provide{
-		Target: func() Lifecycle { return app.lifecycle },
-		Stack:  frames,
+		Target: func() (Lifecycle, Prechecker) {
+			return app.lifecycle, app.prechecker
+		},
+		Stack: frames,
 	})
 	app.root.provide(provide{Target: app.shutdowner, Stack: frames})
 	app.root.provide(provide{Target: app.dotGraph, Stack: frames})
@@ -649,7 +659,16 @@ var (
 // hooks. Because initialization calls constructors serially and in dependency
 // order, hooks are naturally registered in serial and dependency order too.
 //
-// Start executes all OnStart hooks registered with the application's
+// Before running any OnStart hooks, Start runs the pre-checks registered
+// with a [Prechecker] obtained from the dependency injection graph, one at
+// a time and in registration order. The checks share ctx (and its deadline)
+// with the OnStart phase. Non-cancellation errors are combined into a single
+// error containing each failed check's name and cause; if any check fails or
+// the context is canceled, Start returns without running any OnStart hooks
+// and without calling any OnStop hooks. Pre-checks are re-run on every
+// Start call, so a failed start can be retried.
+//
+// Start then executes all OnStart hooks registered with the application's
 // Lifecycle, one at a time and in order. This ensures that each constructor's
 // start hooks aren't executed until all its dependencies' start hooks
 // complete. If any of the start hooks return an error, Start short-circuits,
@@ -698,6 +717,13 @@ func (app *App) withRollback(
 }
 
 func (app *App) start(ctx context.Context) error {
+	// Run the pre-check phase before any OnStart hook. On failure, the
+	// lifecycle never leaves the stopped state: no OnStart hooks ran, so
+	// Stop has nothing to roll back and must not be called.
+	if err := app.lifecycle.Precheck(ctx); err != nil {
+		return err
+	}
+
 	return app.withRollback(ctx, func(ctx context.Context) error {
 		if err := app.lifecycle.Start(ctx); err != nil {
 			return err
