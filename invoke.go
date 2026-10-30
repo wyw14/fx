@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"strings"
 
+	"go.uber.org/dig"
 	"go.uber.org/fx/internal/fxreflect"
 )
 
@@ -90,22 +91,24 @@ func (o invokeOption) String() string {
 	return fmt.Sprintf("fx.Invoke(%s)", strings.Join(items, ", "))
 }
 
-func runInvoke(c container, i invoke) error {
+// runInvoke invokes a function on the given container. It returns the
+// function that Dig actually invoked after applying any Fx annotations.
+func runInvoke(c container, i invoke, opts ...dig.InvokeOption) (any, error) {
 	fn := i.Target
 	switch fn := fn.(type) {
 	case Option:
-		return fmt.Errorf("fx.Option should be passed to fx.New directly, "+
+		return nil, fmt.Errorf("fx.Option should be passed to fx.New directly, "+
 			"not to fx.Invoke: fx.Invoke received %v from:\n%+v",
 			fn, i.Stack)
 
 	case annotated:
 		af, err := fn.Build()
 		if err != nil {
-			return err
+			return nil, err
 		}
 
-		return c.Invoke(af)
+		return af, c.Invoke(af, opts...)
 	default:
-		return c.Invoke(fn)
+		return fn, c.Invoke(fn, opts...)
 	}
 }

@@ -217,8 +217,12 @@ type decorator struct {
 	ReplaceType reflect.Type // set only if IsReplace
 }
 
-func runDecorator(c container, d decorator, opts ...dig.DecorateOption) (err error) {
+// runDecorator registers a decorator on the given container. It returns the
+// decorator function that Dig actually received after applying any Fx
+// annotations.
+func runDecorator(c container, d decorator, opts ...dig.DecorateOption) (any, error) {
 	decorator := d.Target
+	var err error
 	defer func() {
 		if err != nil {
 			err = fmt.Errorf("fx.Decorate(%v) from:\n%+vFailed: %w", decorator, d.Stack, err)
@@ -227,11 +231,14 @@ func runDecorator(c container, d decorator, opts ...dig.DecorateOption) (err err
 
 	switch decorator := decorator.(type) {
 	case annotated:
-		if dcor, derr := decorator.Build(); derr == nil {
-			err = c.Decorate(dcor, opts...)
+		dcor, derr := decorator.Build()
+		if derr != nil {
+			return nil, derr
 		}
+		err = c.Decorate(dcor, opts...)
+		return dcor, err
 	default:
 		err = c.Decorate(decorator, opts...)
+		return decorator, err
 	}
-	return
 }

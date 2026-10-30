@@ -305,6 +305,11 @@ type App struct {
 	container *dig.Container
 	root      *module
 
+	// tracker observes which constructors, decorators, and invocations ran
+	// while the application was being assembled, to power UnusedDependencies.
+	// It never resolves values on its own.
+	tracker *dependencyTracker
+
 	// Timeouts used
 	startTimeout time.Duration
 	stopTimeout  time.Duration
@@ -334,6 +339,11 @@ type provide struct {
 
 	// Set if the type should be provided at private scope.
 	Private bool
+
+	// isBuiltin is true for the values Fx provides to every application
+	// (Lifecycle, Shutdowner, DotGraph). They are excluded from the unused
+	// dependencies report.
+	isBuiltin bool
 }
 
 // invoke is a single invocation request to Fx.
@@ -427,6 +437,7 @@ func New(opts ...Option) *App {
 		startTimeout: DefaultTimeout,
 		stopTimeout:  DefaultTimeout,
 		receivers:    newSignalReceivers(),
+		tracker:      newDependencyTracker(),
 	}
 	app.root = &module{
 		app: app,
@@ -480,11 +491,12 @@ func New(opts ...Option) *App {
 	// E.g., for a custom logger that relies on the Lifecycle type.
 	frames := fxreflect.CallerStack(0, 0) // include New in the stack for default Provides
 	app.root.provide(provide{
-		Target: func() Lifecycle { return app.lifecycle },
-		Stack:  frames,
+		Target:    func() Lifecycle { return app.lifecycle },
+		Stack:     frames,
+		isBuiltin: true,
 	})
-	app.root.provide(provide{Target: app.shutdowner, Stack: frames})
-	app.root.provide(provide{Target: app.dotGraph, Stack: frames})
+	app.root.provide(provide{Target: app.shutdowner, Stack: frames, isBuiltin: true})
+	app.root.provide(provide{Target: app.dotGraph, Stack: frames, isBuiltin: true})
 	app.root.provideAll()
 
 	// Run decorators before executing any Invokes

@@ -192,6 +192,7 @@ func (m *module) provide(p provide) {
 
 	funcName := fxreflect.FuncName(p.Target)
 	var info dig.ProvideInfo
+	node := m.app.tracker.provider(funcName, m, p.Private, false, p.isBuiltin)
 	opts := []dig.ProvideOption{
 		dig.FillProvideInfo(&info),
 		dig.Export(!p.Private),
@@ -210,11 +211,18 @@ func (m *module) provide(p provide) {
 				Runtime:    ci.Runtime,
 				Err:        ci.Error,
 			})
+			if ci.Error == nil {
+				m.app.tracker.markCalled(node)
+			}
 		}),
 	}
 
-	if err := runProvide(m.scope, p, opts...); err != nil {
+	ctor, err := runProvide(m.scope, p, opts...)
+	if err != nil {
 		m.app.err = err
+	} else {
+		m.app.tracker.setOutputs(node, info.Outputs)
+		m.app.tracker.setInputs(node, info.Inputs, ctor)
 	}
 	outputNames := make([]string, len(info.Outputs))
 	for i, o := range info.Outputs {
@@ -234,7 +242,10 @@ func (m *module) provide(p provide) {
 
 func (m *module) supply(p provide) {
 	typeName := p.SupplyType.String()
+	var info dig.ProvideInfo
+	node := m.app.tracker.provider(fmt.Sprintf("fx.Supply(%s)", typeName), m, p.Private, true, p.isBuiltin)
 	opts := []dig.ProvideOption{
+		dig.FillProvideInfo(&info),
 		dig.Export(!p.Private),
 		dig.WithProviderBeforeCallback(func(bci dig.BeforeCallbackInfo) {
 			m.log.LogEvent(&fxevent.BeforeRun{
@@ -250,11 +261,18 @@ func (m *module) supply(p provide) {
 				Runtime:    ci.Runtime,
 				ModuleName: m.name,
 			})
+			if ci.Error == nil {
+				m.app.tracker.markCalled(node)
+			}
 		}),
 	}
 
-	if err := runProvide(m.scope, p, opts...); err != nil {
+	ctor, err := runProvide(m.scope, p, opts...)
+	if err != nil {
 		m.app.err = err
+	} else {
+		m.app.tracker.setOutputs(node, info.Outputs)
+		m.app.tracker.setInputs(node, info.Inputs, ctor)
 	}
 
 	m.log.LogEvent(&fxevent.Supplied{
@@ -299,15 +317,22 @@ func (m *module) installEventLogger(buffer *logBuffer) (err error) {
 
 	// TODO: Use dig.FillProvideInfo to inspect the provided constructor
 	// and fail the application if its signature didn't match.
-	if err := m.scope.Provide(p.Target); err != nil {
+	var info dig.ProvideInfo
+	implicit := m.app.tracker.implicitProvider(m)
+	if err := m.scope.Provide(p.Target, dig.FillProvideInfo(&info)); err != nil {
 		return fmt.Errorf("fx.WithLogger(%v) from:\n%+v\nin Module: %q\nFailed: %w",
 			fname, p.Stack, m.name, err)
 	}
+	m.app.tracker.setInputs(implicit, info.Inputs, p.Target)
 
-	return m.scope.Invoke(func(log fxevent.Logger) {
+	if err := m.scope.Invoke(func(log fxevent.Logger) {
 		m.log = log
 		buffer.Connect(log)
-	})
+	}); err != nil {
+		return err
+	}
+	m.app.tracker.markCalled(implicit)
+	return nil
 }
 
 func (m *module) invokeAll() error {
@@ -332,7 +357,13 @@ func (m *module) invoke(i invoke) (err error) {
 		FunctionName: fnName,
 		ModuleName:   m.name,
 	})
-	err = runInvoke(m.scope, i)
+	var info dig.InvokeInfo
+	inv := m.app.tracker.invoke(m)
+	fn, err := runInvoke(m.scope, i, dig.FillInvokeInfo(&info))
+	if err == nil {
+		m.app.tracker.markInvoked(inv)
+		m.app.tracker.setInvokeInputs(inv, info.Inputs, fn)
+	}
 	m.log.LogEvent(&fxevent.Invoked{
 		FunctionName: fnName,
 		ModuleName:   m.name,
@@ -364,6 +395,7 @@ func (m *module) decorate(d decorator) (err error) {
 
 	funcName := fxreflect.FuncName(d.Target)
 	var info dig.DecorateInfo
+	node := m.app.tracker.decorator(m)
 	opts := []dig.DecorateOption{
 		dig.FillDecorateInfo(&info),
 		dig.WithDecoratorBeforeCallback(func(bci dig.BeforeCallbackInfo) {
@@ -381,10 +413,16 @@ func (m *module) decorate(d decorator) (err error) {
 				Runtime:    ci.Runtime,
 				Err:        ci.Error,
 			})
+			if ci.Error == nil {
+				m.app.tracker.markCalled(node)
+			}
 		}),
 	}
 
-	err = runDecorator(m.scope, d, opts...)
+	dcor, err := runDecorator(m.scope, d, opts...)
+	if err == nil {
+		m.app.tracker.setInputs(node, info.Inputs, dcor)
+	}
 	outputNames := make([]string, len(info.Outputs))
 	for i, o := range info.Outputs {
 		outputNames[i] = o.String()
@@ -404,7 +442,10 @@ func (m *module) decorate(d decorator) (err error) {
 
 func (m *module) replace(d decorator) error {
 	typeName := d.ReplaceType.String()
+	var info dig.DecorateInfo
+	node := m.app.tracker.decorator(m)
 	opts := []dig.DecorateOption{
+		dig.FillDecorateInfo(&info),
 		dig.WithDecoratorBeforeCallback(func(bci dig.BeforeCallbackInfo) {
 			m.log.LogEvent(&fxevent.BeforeRun{
 				Name:       fmt.Sprintf("stub(%v)", typeName),
@@ -420,10 +461,16 @@ func (m *module) replace(d decorator) error {
 				Runtime:    ci.Runtime,
 				Err:        ci.Error,
 			})
+			if ci.Error == nil {
+				m.app.tracker.markCalled(node)
+			}
 		}),
 	}
 
-	err := runDecorator(m.scope, d, opts...)
+	dcor, err := runDecorator(m.scope, d, opts...)
+	if err == nil {
+		m.app.tracker.setInputs(node, info.Inputs, dcor)
+	}
 	m.log.LogEvent(&fxevent.Replaced{
 		ModuleName:      m.name,
 		StackTrace:      d.Stack.Strings(),

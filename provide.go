@@ -119,10 +119,13 @@ func (o provideOption) String() string {
 	return fmt.Sprintf("fx.Provide(%s)", strings.Join(items, ", "))
 }
 
-func runProvide(c container, p provide, opts ...dig.ProvideOption) error {
+// runProvide provides a constructor to the given container. It returns the
+// constructor function that was actually handed to Dig after applying any
+// Fx annotations, so callers can inspect its real signature.
+func runProvide(c container, p provide, opts ...dig.ProvideOption) (any, error) {
 	constructor := p.Target
 	if _, ok := constructor.(Option); ok {
-		return fmt.Errorf("fx.Option should be passed to fx.New directly, "+
+		return nil, fmt.Errorf("fx.Option should be passed to fx.New directly, "+
 			"not to fx.Provide: fx.Provide received %v from:\n%+v",
 			constructor, p.Stack)
 	}
@@ -130,26 +133,27 @@ func runProvide(c container, p provide, opts ...dig.ProvideOption) error {
 	switch constructor := constructor.(type) {
 	case annotationError:
 		// fx.Annotate failed. Turn it into an Fx error.
-		return fmt.Errorf(
+		return nil, fmt.Errorf(
 			"encountered error while applying annotation using fx.Annotate to %s: %w",
 			fxreflect.FuncName(constructor.target), constructor.err)
 
 	case annotated:
 		ctor, err := constructor.Build()
 		if err != nil {
-			return fmt.Errorf("fx.Provide(%v) from:\n%+vFailed: %w", constructor, p.Stack, err)
+			return nil, fmt.Errorf("fx.Provide(%v) from:\n%+vFailed: %w", constructor, p.Stack, err)
 		}
 
 		opts = append(opts, dig.LocationForPC(constructor.FuncPtr))
 		if err := c.Provide(ctor, opts...); err != nil {
-			return fmt.Errorf("fx.Provide(%v) from:\n%+vFailed: %w", constructor, p.Stack, err)
+			return nil, fmt.Errorf("fx.Provide(%v) from:\n%+vFailed: %w", constructor, p.Stack, err)
 		}
+		return ctor, nil
 
 	case Annotated:
 		ann := constructor
 		switch {
 		case len(ann.Group) > 0 && len(ann.Name) > 0:
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"fx.Annotated may specify only one of Name or Group: received %v from:\n%+v",
 				ann, p.Stack)
 		case len(ann.Name) > 0:
@@ -159,8 +163,9 @@ func runProvide(c container, p provide, opts ...dig.ProvideOption) error {
 		}
 
 		if err := c.Provide(ann.Target, opts...); err != nil {
-			return fmt.Errorf("fx.Provide(%v) from:\n%+vFailed: %w", ann, p.Stack, err)
+			return nil, fmt.Errorf("fx.Provide(%v) from:\n%+vFailed: %w", ann, p.Stack, err)
 		}
+		return ann.Target, nil
 
 	default:
 		if reflect.TypeOf(constructor).Kind() == reflect.Func {
@@ -170,7 +175,7 @@ func runProvide(c container, p provide, opts ...dig.ProvideOption) error {
 				t := ft.Out(i)
 
 				if t == reflect.TypeOf(Annotated{}) {
-					return fmt.Errorf(
+					return nil, fmt.Errorf(
 						"fx.Annotated should be passed to fx.Provide directly, "+
 							"it should not be returned by the constructor: "+
 							"fx.Provide received %v from:\n%+v",
@@ -180,8 +185,8 @@ func runProvide(c container, p provide, opts ...dig.ProvideOption) error {
 		}
 
 		if err := c.Provide(constructor, opts...); err != nil {
-			return fmt.Errorf("fx.Provide(%v) from:\n%+vFailed: %w", fxreflect.FuncName(constructor), p.Stack, err)
+			return nil, fmt.Errorf("fx.Provide(%v) from:\n%+vFailed: %w", fxreflect.FuncName(constructor), p.Stack, err)
 		}
+		return constructor, nil
 	}
-	return nil
 }
