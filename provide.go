@@ -140,6 +140,11 @@ func runProvide(c container, p provide, opts ...dig.ProvideOption) error {
 			return fmt.Errorf("fx.Provide(%v) from:\n%+vFailed: %w", constructor, p.Stack, err)
 		}
 
+		ctor, err = wrapWithGroupConstraints(ctor)
+		if err != nil {
+			return fmt.Errorf("fx.Provide(%v) from:\n%+vFailed: %w", constructor, p.Stack, err)
+		}
+
 		opts = append(opts, dig.LocationForPC(constructor.FuncPtr))
 		if err := c.Provide(ctor, opts...); err != nil {
 			return fmt.Errorf("fx.Provide(%v) from:\n%+vFailed: %w", constructor, p.Stack, err)
@@ -158,7 +163,12 @@ func runProvide(c container, p provide, opts ...dig.ProvideOption) error {
 			opts = append(opts, dig.Group(ann.Group))
 		}
 
-		if err := c.Provide(ann.Target, opts...); err != nil {
+		target, err := wrapWithGroupConstraints(ann.Target)
+		if err != nil {
+			return fmt.Errorf("fx.Provide(%v) from:\n%+vFailed: %w", ann, p.Stack, err)
+		}
+
+		if err := c.Provide(target, opts...); err != nil {
 			return fmt.Errorf("fx.Provide(%v) from:\n%+vFailed: %w", ann, p.Stack, err)
 		}
 
@@ -179,7 +189,13 @@ func runProvide(c container, p provide, opts ...dig.ProvideOption) error {
 			}
 		}
 
-		if err := c.Provide(constructor, opts...); err != nil {
+		ctor, err := wrapWithGroupConstraints(constructor)
+		if err != nil {
+			return fmt.Errorf("fx.Provide(%v) from:\n%+vFailed: %w",
+				fxreflect.FuncName(constructor), p.Stack, err)
+		}
+
+		if err := c.Provide(ctor, opts...); err != nil {
 			return fmt.Errorf("fx.Provide(%v) from:\n%+vFailed: %w", fxreflect.FuncName(constructor), p.Stack, err)
 		}
 	}

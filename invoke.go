@@ -104,8 +104,20 @@ func runInvoke(c container, i invoke) error {
 			return err
 		}
 
+		af, err = wrapWithGroupConstraints(af)
+		if err != nil {
+			return fmt.Errorf("fx.Invoke(%v) from:\n%+vFailed: %w",
+				fxreflect.FuncName(fn.Target), i.Stack, err)
+		}
+
 		return c.Invoke(af)
 	default:
-		return c.Invoke(fn)
+		wrapped, err := wrapWithGroupConstraints(fn)
+		if err != nil {
+			return fmt.Errorf("fx.Invoke(%v) from:\n%+vFailed: %w",
+				fxreflect.FuncName(fn), i.Stack, err)
+		}
+
+		return c.Invoke(wrapped)
 	}
 }
